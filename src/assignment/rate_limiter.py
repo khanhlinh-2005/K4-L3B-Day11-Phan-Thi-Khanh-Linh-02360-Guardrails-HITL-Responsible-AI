@@ -1,49 +1,118 @@
-"""
-Assignment 11 — Rate Limiter starter (TODO).
-
-Sliding-window, per-user rate limiting. Blocks abuse that other
-guardrail layers do not address (flooding / cost attacks).
-"""
 from __future__ import annotations
 
-from collections import defaultdict, deque
 import time
+from collections import defaultdict, deque
 
 from google.adk.plugins import base_plugin
-from google.genai import types
 
 
 class RateLimitPlugin(base_plugin.BasePlugin):
-    """Block users who exceed max_requests within window_seconds."""
+    """
+    Rate limit theo từng user_id.
 
-    def __init__(self, max_requests: int = 10, window_seconds: int = 60):
+    Mặc định:
+        10 requests / 60 seconds
+
+    Nếu vượt limit:
+        - không cho request đi tiếp
+        - trả message Rate limit...
+    """
+
+    def __init__(
+        self,
+        max_requests: int = 10,
+        window_seconds: int = 60,
+    ):
         super().__init__(name="rate_limiter")
+
         self.max_requests = max_requests
         self.window_seconds = window_seconds
-        self.user_windows: dict[str, deque] = defaultdict(deque)
+
+        self.requests: dict[str, deque] = defaultdict(deque)
+
         self.blocked_count = 0
-        self.total_count = 0
+        self.passed_count = 0
 
-    def _block_response(self, message: str) -> types.Content:
-        return types.Content(
-            role="model",
-            parts=[types.Part.from_text(text=message)],
-        )
+    def _get_user_id(self, callback_context) -> str:
+        """
+        Lấy user_id từ callback context.
+        Có fallback để suite/test vẫn chạy được.
+        """
 
-    async def on_user_message_callback(self, *, invocation_context, user_message):
-        """Return Content to block, or None to allow."""
-        self.total_count += 1
-        user_id = getattr(invocation_context, "user_id", None) or "anonymous"
-        now = time.time()
-        window = self.user_windows[user_id]
+        user_id = getattr(callback_context, "user_id", None)
 
-        # TODO: Implement sliding window:
-        # 1. Pop timestamps older than (now - window_seconds) from the left
-        # 2. If len(window) >= max_requests:
-        #       wait = window_seconds - (now - window[0])
-        #       self.blocked_count += 1
-        #       return self._block_response(
-        #           f"Rate limit exceeded. Try again in {wait:.0f}s."
-        #       )
-        # 3. Else: append now, return None
-        raise NotImplementedError("Implement RateLimitPlugin.on_user_message_callback")
+        if user_id:
+            return str(user_id)
+
+        session = getattr(callback_context, "session", None)
+
+        if session is not None:
+            user_id = getattr(session, "user_id", None)
+
+            if user_id:
+                return str(user_id)
+
+        return "anonymous"
+
+    def check(self, user_id: str) -> bool:
+        """
+        Return True nếu request được phép.
+        Return False nếu bị rate limit.
+        """
+
+        now = time.monotonic()
+        timestamps = self.requests[user_id]
+
+        # Xóa timestamp đã hết cửa sổ
+        while timestamps:
+            if now - timestamps[0] >= self.window_seconds:
+                timestamps.popleft()
+            else:
+                break
+
+        if len(timestamps) >= self.max_requests:
+            self.blocked_count += 1
+            return False
+
+        timestamps.append(now)
+        self.passed_count += 1
+
+        return True
+
+    async def before_model_callback(
+        self,
+        *,
+        callback_context,
+        llm_request,
+    ):
+        """
+        Chặn request trước khi gọi LLM.
+        """
+
+        user_id = self._get_user_id(callback_context)
+
+        allowed = self.check(user_id)
+
+        if not allowed:
+            return {
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "text": (
+                                "Rate limit exceeded. "
+                                "Please try again later."
+                            )
+                        }
+                    ],
+                }
+            }
+
+        return None
+
+    def reset(self):
+        """Reset toàn bộ rate-limit state."""
+
+        self.requests.clear()
+        self.blocked_count = 0
+        self.passed_count = 0

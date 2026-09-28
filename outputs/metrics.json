@@ -1,0 +1,14 @@
+{
+  "total_requests": 18,
+  "blocked_requests": 9,
+  "rate_limited_requests": 0,
+  "alerts": [
+    {
+      "type": "blocked_requests",
+      "severity": "warning",
+      "message": "Blocked request count exceeded warning threshold.",
+      "value": 9,
+      "threshold": 5
+    }
+  ]
+}
